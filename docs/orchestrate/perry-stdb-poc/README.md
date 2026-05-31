@@ -34,5 +34,6 @@ Phase checklist:
 - [x] Reuse audit, both forks (`12-bench-audit-stdb.md`, `12-bench-audit-perry.md`)
 - [x] Context bundle (`13-perry-bench-context.md`)
 - [x] Architect: minimal path + kernel/workload definition + verification spec (`14-perry-bench-design.md`) — bypass wiring, integer xorshift/mix kernel, empty+kernel = one milestone, adversarial verify spec'd
-- [ ] Implement M2-proper dispatch + bench wiring + run + capture (`15-perry-bench-impl.md`)
-- [ ] Fresh-eyes adversarial verification of the number (`16-perry-number-verify.md`)
+- [~] Implement M2-proper dispatch + bench wiring + run + capture (`15-perry-bench-impl.md`) — dispatcher written (uncommitted); BLOCKED: DB-1 fired (benchmark-shaped kernel pulls `js_*`), arity-mismatch trap. No numbers.
+- [ ] Fresh-eyes diagnostic: confirm Findings A/B, probe amputation across kernel shapes, cost of greening wasm32 runtime archive (`16-amputation-diagnostic.md`)
+- [ ] (was: fresh-eyes number-verify) — deferred until a real number exists
