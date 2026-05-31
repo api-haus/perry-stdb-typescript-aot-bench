@@ -34,6 +34,7 @@ Phase checklist:
 - [x] Reuse audit, both forks (`12-bench-audit-stdb.md`, `12-bench-audit-perry.md`)
 - [x] Context bundle (`13-perry-bench-context.md`)
 - [x] Architect: minimal path + kernel/workload definition + verification spec (`14-perry-bench-design.md`) — bypass wiring, integer xorshift/mix kernel, empty+kernel = one milestone, adversarial verify spec'd
-- [~] Implement M2-proper dispatch + bench wiring + run + capture (`15-perry-bench-impl.md`) — dispatcher written (uncommitted); BLOCKED: DB-1 fired (benchmark-shaped kernel pulls `js_*`), arity-mismatch trap. No numbers.
-- [ ] Fresh-eyes diagnostic: confirm Findings A/B, probe amputation across kernel shapes, cost of greening wasm32 runtime archive (`16-amputation-diagnostic.md`)
-- [ ] (was: fresh-eyes number-verify) — deferred until a real number exists
+- [x] Implement dispatch (perry-fork `fd9d7e3`) — dispatcher committed; BLOCKED on runtime archive (Finding A: loop kernels pull `js_*`; Finding B: no no-arg kernel links without runtime)
+- [x] Rebase perry-fork onto `v0.5.1028` stable tag (was: main tip with 50 unstable node-fix commits)
+- [x] Consolidated: unblock wasm32 runtime archive + produce first Perry-vs-V8 number (`16-perry-runtime-bench.md`) — NUMBERS LANDED
+- [ ] Fresh-eyes number-verify (escalated: shadow-stack overhead quantification + V8 kernel comparison)
