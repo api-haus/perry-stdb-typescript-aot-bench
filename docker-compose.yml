@@ -1,0 +1,16 @@
+# Stock SpacetimeDB server, pinned to v2.0.1 (the proven-publishable baseline; ABI v10).
+# The module build/publish step runs on the HOST, not in this container (the image
+# ships no Node toolchain) — see scripts/. The SpacetimeDB core/host is never forked;
+# Perry-compiled modules are published to this unmodified server like any Wasm module.
+services:
+  spacetimedb:
+    image: clockworklabs/spacetime:v2.0.1
+    command: start
+    ports:
+      - "3000:3000"
+    volumes:
+      - stdb-data:/stdb
+    restart: unless-stopped
+
+volumes:
+  stdb-data:
