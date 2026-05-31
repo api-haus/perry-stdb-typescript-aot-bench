@@ -31,7 +31,7 @@ The SpacetimeDB **core/host is never forked.** A `PerryWasm` host type (teaching
 
 ## Status
 
-Investigation and the canonical plan are complete, and **M1 is done and independently verified**: a forked Perry now compiles a trivial TypeScript file to a freestanding `wasm32` module with zero `rt`/`ffi`/`env` imports, via the LLVM pipeline (`api-haus/perry` branch `feat/target-spacetimedb`). The next milestone, M2, is the long pole — the ABI-exact reactor dunders, `spacetime_10.x` imports, addressable BSATN memory, and the runtime-core shell amputation. See `docs/orchestrate/perry-stdb-poc/`:
+Investigation and the canonical plan are complete; **M1 done + verified** (freestanding `wasm32` via the LLVM pipeline); and **the M2 make-or-break spike has passed, independently verified** — the project's central risk is retired. A 770-byte module produced end-to-end by the forked Perry toolchain (named/typed `__describe_module__`/`__call_reducer__` dunders, `spacetime_10.0` import-namespace selection, addressable static BSATN buffer, all via genuine codegen) **publishes to the stock v2.0.1 server, instantiates, and the reducer is callable** (`api-haus/perry` branch `feat/target-spacetimedb`). What remains in M2-proper is follow-through, not unknowns: generating the BSATN module def from the user schema, real `__call_reducer__` dispatch, linking the `wasm32` runtime archive (the shell-amputation long pole), then M3 (move the ABI shim into the TS runtime / SDK) and M4 (the `--engine perry` release flag). See `docs/orchestrate/perry-stdb-poc/`:
 
 - `00-context.md` — recon facts and source-of-truth hierarchy.
 - `01-perry-wasm.md` — Perry's current `--target wasm` is a JS-host artifact (211 `rt` imports, index-named exports), unusable for the native ABI as-is.
@@ -43,6 +43,8 @@ Investigation and the canonical plan are complete, and **M1 is done and independ
 - `07-fork-plan.md` — the canonical milestone plan.
 - `08-m1-llvm-wasm32.md` — M1: the LLVM→`wasm32` freestanding target (what changed, the wasm dump, what M2 inherits).
 - `08b-m1-verify.md` — independent verification of M1 (reproduced with a different module).
+- `09-m2-spike-abi-load.md` — M2 make-or-break spike: the ABI shape emitted by the Perry toolchain, published to the stock server, loaded + callable (with the explicit codegen-vs-shim split and what M2-proper must absorb).
+- `09b-m2-verify.md` — independent verification of the M2 spike (re-published to a fresh DB).
 
 ## Layout
 
