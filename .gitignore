@@ -1,0 +1,17 @@
+# Read-only reference clones of upstream Perry + SpacetimeDB (re-clone as needed)
+_vendor/
+
+# Build / probe artifacts
+_scratch/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Rust
+target/
+
+# OS / editor
+.DS_Store
+*.swp
