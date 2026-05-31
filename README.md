@@ -31,7 +31,7 @@ The SpacetimeDB **core/host is never forked.** A `PerryWasm` host type (teaching
 
 ## Status
 
-The feasibility investigation is complete and the engineering plan is being written. See `docs/orchestrate/perry-stdb-poc/`:
+Investigation and the canonical plan are complete, and **M1 is done and independently verified**: a forked Perry now compiles a trivial TypeScript file to a freestanding `wasm32` module with zero `rt`/`ffi`/`env` imports, via the LLVM pipeline (`api-haus/perry` branch `feat/target-spacetimedb`). The next milestone, M2, is the long pole — the ABI-exact reactor dunders, `spacetime_10.x` imports, addressable BSATN memory, and the runtime-core shell amputation. See `docs/orchestrate/perry-stdb-poc/`:
 
 - `00-context.md` — recon facts and source-of-truth hierarchy.
 - `01-perry-wasm.md` — Perry's current `--target wasm` is a JS-host artifact (211 `rt` imports, index-named exports), unusable for the native ABI as-is.
@@ -41,6 +41,8 @@ The feasibility investigation is complete and the engineering plan is being writ
 - `05-perry-runtime-wasm-port.md` — the `perry-runtime` → wasm32 port surface (blockers + fixes).
 - `06-stdb-sdk-fork-surface.md` — the TypeScript-module release-option fork surface.
 - `07-fork-plan.md` — the canonical milestone plan.
+- `08-m1-llvm-wasm32.md` — M1: the LLVM→`wasm32` freestanding target (what changed, the wasm dump, what M2 inherits).
+- `08b-m1-verify.md` — independent verification of M1 (reproduced with a different module).
 
 ## Layout
 
