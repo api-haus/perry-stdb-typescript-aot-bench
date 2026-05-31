@@ -1,0 +1,325 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 8d733d2..fe93417 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -216,7 +216,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -227,7 +227,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -1664,7 +1664,7 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -1688,6 +1688,17 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "dlmalloc"
++version = "0.2.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
++dependencies = [
++ "cfg-if",
++ "libc",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "dotenvy"
+ version = "0.15.7"
+@@ -1915,7 +1926,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -2426,7 +2437,7 @@ dependencies = [
+  "gobject-sys 0.22.6",
+  "libc",
+  "system-deps",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -3474,7 +3485,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
+ dependencies = [
+  "hermit-abi",
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5452,7 +5463,9 @@ dependencies = [
+  "anyhow",
+  "base64",
+  "dirs",
++ "dlmalloc",
+  "fancy-regex",
++ "getrandom 0.2.17",
+  "hostname",
+  "idna",
+  "itoa",
+@@ -6736,7 +6749,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7256,7 +7269,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+ dependencies = [
+  "libc",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7521,7 +7534,7 @@ dependencies = [
+  "cfg-if",
+  "libc",
+  "psm",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7829,7 +7842,7 @@ dependencies = [
+  "getrandom 0.4.2",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -8319,7 +8332,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
+ dependencies = [
+  "memoffset",
+  "tempfile",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -8884,7 +8897,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.48.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+diff --git a/crates/perry-runtime/Cargo.toml b/crates/perry-runtime/Cargo.toml
+index 2771da9..7d24b5f 100644
+--- a/crates/perry-runtime/Cargo.toml
++++ b/crates/perry-runtime/Cargo.toml
+@@ -44,7 +44,6 @@ wasm-host = []
+ [dependencies]
+ thiserror.workspace = true
+ anyhow.workspace = true
+-libc = "0.2"
+ rand = "0.8"
+ regex = "1"
+ # Taffy — flexbox / grid layout engine for the perry/tui module
+@@ -67,8 +66,18 @@ url = "2"
+ # Set as #[global_allocator] in lib.rs, so it covers Rust heap allocations in
+ # both the `perry` CLI and the compiled-TypeScript executables linked against
+ # libperry_runtime.a.
++# MEASUREMENT (wasm-port): libc + mimalloc are native-host only. On
++# freestanding wasm32 there is no libc and mimalloc's C build has no wasm
++# path, so both move to a non-wasm target block. wasm32 gets dlmalloc as the
++# global allocator and getrandom's `custom` backend (host-backed RNG).
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++libc = "0.2"
+ mimalloc = { version = "0.1", default-features = false }
+ 
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++dlmalloc = { version = "0.2", features = ["global"] }
++getrandom = { version = "0.2", features = ["custom"] }
++
+ # We'll add GC bindings later
+ # For now, use a simple bump allocator or leak memory for MVP
+ 
+diff --git a/crates/perry-runtime/src/date.rs b/crates/perry-runtime/src/date.rs
+index 63dca28..30f3d4a 100644
+--- a/crates/perry-runtime/src/date.rs
++++ b/crates/perry-runtime/src/date.rs
+@@ -155,7 +155,16 @@ pub fn is_registered_date_bits(bits: u64) -> bool {
+ /// Returns (year, month [1-12], day, hour, minute, second, tz_offset_seconds).
+ /// tz_offset_seconds is the number of seconds that need to be added to the
+ /// UTC timestamp to get the local-time representation (i.e. local - UTC).
+-#[cfg(unix)]
++// MEASUREMENT (wasm-port): a freestanding wasm32 sandbox has no libc
++// localtime / timezone database. Local time == UTC (tz_offset 0). The pure-
++// Rust civil-calendar `timestamp_to_components` already handles the math.
++#[cfg(target_arch = "wasm32")]
++fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
++    let (y, m, d, h, mi, s) = timestamp_to_components(secs);
++    (y, m, d, h, mi, s, 0)
++}
++
++#[cfg(all(unix, not(target_arch = "wasm32")))]
+ fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
+     unsafe {
+         let t: libc::time_t = secs as libc::time_t;
+diff --git a/crates/perry-runtime/src/gc/barrier.rs b/crates/perry-runtime/src/gc/barrier.rs
+index 28dc691..34cbf46 100644
+--- a/crates/perry-runtime/src/gc/barrier.rs
++++ b/crates/perry-runtime/src/gc/barrier.rs
+@@ -782,7 +782,7 @@ pub(super) unsafe fn plausible_arena_user_ptr_header(
+     let size = (*header).size as usize;
+     if gc_type_info(obj_type).is_none()
+         || size < GC_HEADER_SIZE
+-        || size > (1usize << 34)
++        || (size as u64) > (1u64 << 34)
+         || (*header).gc_flags & GC_FLAG_ARENA == 0
+         || (*header).gc_flags & GC_FLAG_FORWARDED != 0
+     {
+@@ -1043,7 +1043,7 @@ pub(super) fn malloc_gc_parent_addr(parent_addr: usize) -> bool {
+         let size = (*header).size as usize;
+         gc_type_info(obj_type).is_some()
+             && size >= GC_HEADER_SIZE
+-            && size <= (1usize << 34)
++            && (size as u64) <= (1u64 << 34)
+             && (*header).gc_flags & GC_FLAG_ARENA == 0
+             && (*header).gc_flags & GC_FLAG_FORWARDED == 0
+     }
+diff --git a/crates/perry-runtime/src/gc/copying.rs b/crates/perry-runtime/src/gc/copying.rs
+index 65d4d88..a992f52 100644
+--- a/crates/perry-runtime/src/gc/copying.rs
++++ b/crates/perry-runtime/src/gc/copying.rs
+@@ -193,7 +193,7 @@ pub(super) unsafe fn plausible_gc_header(header: *mut GcHeader, arena: bool) ->
+         return false;
+     }
+     let size = (*header).size as usize;
+-    if size < GC_HEADER_SIZE || size > (1usize << 34) {
++    if size < GC_HEADER_SIZE || (size as u64) > (1u64 << 34) {
+         return false;
+     }
+     let is_arena = (*header).gc_flags & GC_FLAG_ARENA != 0;
+diff --git a/crates/perry-runtime/src/gc/mod.rs b/crates/perry-runtime/src/gc/mod.rs
+index bb32eeb..bfbd68b 100644
+--- a/crates/perry-runtime/src/gc/mod.rs
++++ b/crates/perry-runtime/src/gc/mod.rs
+@@ -304,6 +304,7 @@ pub fn gc_init() {
+     // from the reactor's registry (the event loop holds no JSValue root for a
+     // fire-and-forget spawn). Scan + rewrite them so a GC between ticks doesn't
+     // reclaim the object whose `data`/`exit` handlers are still pending.
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::child_process::reactor::cp_reactor_scan_roots_mut);
+     gc_register_mutable_root_scanner(json_parse_mutable_root_scanner);
+     gc_register_mutable_root_scanner(intern_table_mutable_root_scanner);
+@@ -338,12 +339,17 @@ pub fn gc_init() {
+     // singletons store heap pointers in TLS caches; keep them live and rewrite
+     // them if a copying collection moves their backing allocations.
+     gc_register_mutable_root_scanner(crate::object::scan_native_callable_export_roots_mut);
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::tls::scan_tls_roots_mut);
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::os::scan_process_event_listener_roots_mut);
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::os::scan_process_stream_singleton_roots_mut);
+     #[cfg(feature = "full")]
+     gc_register_mutable_root_scanner(crate::plugin::scan_plugin_roots_mut);
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::geisterhand_registry::scan_geisterhand_roots_mut);
++    #[cfg(not(target_arch = "wasm32"))]
+     gc_register_mutable_root_scanner(crate::ui_text_registry::scan_ui_text_registry_roots_mut);
+     // perry/tui hook + state slot pools — they store raw NaN-boxed
+     // value bits but the GC has no other way to know which slots hold
+diff --git a/crates/perry-runtime/src/lib.rs b/crates/perry-runtime/src/lib.rs
+index 3309ecc..0767947 100644
+--- a/crates/perry-runtime/src/lib.rs
++++ b/crates/perry-runtime/src/lib.rs
+@@ -20,9 +20,36 @@
+ /// allocation dispatch from ~25-40ns (macOS `malloc`) to ~5-10ns, which is
+ /// meaningful because `gc_malloc` is called ~1M+ times/sec in allocation-
+ /// heavy workloads (string concat loops, JSON roundtrip, gc_pressure).
++#[cfg(not(target_arch = "wasm32"))]
+ #[global_allocator]
+ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+ 
++// MEASUREMENT (wasm-port): freestanding wasm32 has no mimalloc C build, so
++// route the global allocator through dlmalloc (pure-Rust, wasm-native).
++#[cfg(target_arch = "wasm32")]
++#[global_allocator]
++static GLOBAL: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
++
++// MEASUREMENT (wasm-port): getrandom 0.2 refuses wasm32-unknown-unknown
++// without a backend. In a SpacetimeDB module the only entropy source is the
++// host (`ctx.random`); a real port would forward to a host import. This stub
++// is a deterministic placeholder so the core links — NOT a secure RNG.
++#[cfg(target_arch = "wasm32")]
++mod wasm_getrandom {
++    use std::num::NonZeroU32;
++    pub fn fill(buf: &mut [u8]) -> Result<(), getrandom::Error> {
++        // Deterministic fill: a real port replaces this with a host import
++        // (spacetime ctx.random). Returning zeros keeps the ABI honest about
++        // being a stub.
++        for b in buf.iter_mut() {
++            *b = 0;
++        }
++        let _ = NonZeroU32::new(1);
++        Ok(())
++    }
++    getrandom::register_custom_getrandom!(fill);
++}
++
+ pub mod app_group;
+ pub mod arena;
+ pub mod array;
+diff --git a/crates/perry-runtime/src/timer.rs b/crates/perry-runtime/src/timer.rs
+index 331d25d..3773212 100644
+--- a/crates/perry-runtime/src/timer.rs
++++ b/crates/perry-runtime/src/timer.rs
+@@ -824,7 +824,7 @@ fn raw_closure_pointer(bits: u64) -> Option<usize> {
+             return None;
+         }
+         let size = (*header).size as usize;
+-        if size < crate::gc::GC_HEADER_SIZE || size > (1usize << 34) {
++        if size < crate::gc::GC_HEADER_SIZE || (size as u64) > (1u64 << 34) {
+             return None;
+         }
+         let is_arena = (*header).gc_flags & crate::gc::GC_FLAG_ARENA != 0;
+diff --git a/crates/perry-runtime/src/typedarray.rs b/crates/perry-runtime/src/typedarray.rs
+index fd38835..063859a 100644
+--- a/crates/perry-runtime/src/typedarray.rs
++++ b/crates/perry-runtime/src/typedarray.rs
+@@ -276,7 +276,7 @@ unsafe fn arena_payload_has_gc_type(addr: usize, expected_type: u8) -> bool {
+         return false;
+     }
+     let size = (*header).size as usize;
+-    if size < crate::gc::GC_HEADER_SIZE || size > (1usize << 34) {
++    if size < crate::gc::GC_HEADER_SIZE || (size as u64) > (1u64 << 34) {
+         return false;
+     }
+     if (*header).gc_flags & crate::gc::GC_FLAG_ARENA == 0 {
