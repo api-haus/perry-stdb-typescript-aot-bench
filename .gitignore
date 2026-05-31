@@ -4,6 +4,9 @@ _vendor/
 # Build / probe artifacts
 _scratch/
 
+# Extracted server CLI binary (docker cp from clockworklabs/spacetime:v2.0.1; re-extract as needed, doc 04 §5)
+bin/
+
 # Node
 node_modules/
 dist/
