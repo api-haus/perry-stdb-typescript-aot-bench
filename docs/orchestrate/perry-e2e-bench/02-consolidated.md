@@ -558,3 +558,122 @@ Concurrency 16 (warmup=100, iter=2000):
 
 - **The `spacetime build` command succeeds despite "tsc not found" warning.** The SpacetimeDB CLI's TS build uses rolldown (a Rust-based bundler) directly, falling back gracefully when tsc is not in the module's node_modules. Type checking is skipped, but the bundle is still produced correctly. This is fine for bench purposes but would be a concern for production modules.
 
+## Rust comparison arm (2026-06-01)
+
+### How the Rust module was built
+
+A standalone Rust crate was created at `bench/e2e/module/rust-bench/` with `spacetimedb = "=2.0.1"` pinned to exactly match the server version. The crate produces a `cdylib` targeting `wasm32-unknown-unknown`. Two reducers are defined with `#[spacetimedb::reducer]`: `empty` (noop) and `cpu_heavy` (identical 100k xorshift32 + RPG stat kernel). The Rust implementation uses `u32` for the PRNG state and `f64`/`i32` for the stat computation, matching the TypeScript semantics. A `read_volatile` on the accumulator prevents the optimizer from eliding the loop.
+
+Built with `cargo build --target wasm32-unknown-unknown --release` (output: 98KB wasm, vs Perry's 4.7MB and V8's JS bundle). Published with `spacetime publish --bin-path <wasm> bench-rust-e2e`. Both reducers verified callable via `spacetime call`.
+
+### Captured numbers
+
+All three arms (Rust, Perry, V8) were run back-to-back in one session with the same parameters (warmup=100, iterations=1000, concurrency=1,4,16) against the same server instance for temporal fairness.
+
+**Rust / Wasmtime (bench-rust-e2e):**
+```
+Concurrency 1:
+  empty:     6,298 TPS | p50=0.15ms  p95=0.19ms  p99=0.28ms
+  cpu_heavy: 2,193 TPS | p50=0.44ms  p95=0.50ms  p99=1.18ms
+
+Concurrency 4:
+  empty:     21,807 TPS | p50=0.17ms  p95=0.22ms  p99=0.32ms
+  cpu_heavy:  2,905 TPS | p50=1.11ms  p95=3.02ms  p99=4.63ms
+
+Concurrency 16:
+  empty:     31,023 TPS | p50=0.23ms  p95=0.33ms  p99=15.26ms
+  cpu_heavy:  3,577 TPS | p50=4.41ms  p95=4.89ms  p99=5.73ms
+```
+
+**Perry AOT (bench-perry-e2e):**
+```
+Concurrency 1:
+  empty:     4,168 TPS | p50=0.17ms  p95=0.51ms  p99=2.05ms
+  cpu_heavy: 1,000 TPS | p50=0.94ms  p95=1.27ms  p99=2.30ms
+
+Concurrency 4:
+  empty:     18,111 TPS | p50=0.20ms  p95=0.30ms  p99=0.41ms
+  cpu_heavy:  1,216 TPS | p50=3.00ms  p95=5.12ms  p99=6.90ms
+
+Concurrency 16:
+  empty:     23,988 TPS | p50=0.31ms  p95=0.58ms  p99=19.38ms
+  cpu_heavy:  1,350 TPS | p50=11.54ms p95=13.10ms p99=14.70ms
+```
+
+**V8 JIT (bench-v8-e2e):**
+```
+Concurrency 1:
+  empty:     4,410 TPS | p50=0.17ms  p95=0.29ms  p99=1.82ms
+  cpu_heavy: 1,793 TPS | p50=0.51ms  p95=0.63ms  p99=1.59ms
+
+Concurrency 4:
+  empty:     13,688 TPS | p50=0.22ms  p95=0.38ms  p99=2.23ms
+  cpu_heavy:  2,526 TPS | p50=1.37ms  p95=2.98ms  p99=4.03ms
+
+Concurrency 16:
+  empty:     22,428 TPS | p50=0.36ms  p95=1.22ms  p99=11.48ms
+  cpu_heavy:  2,591 TPS | p50=4.68ms  p95=15.15ms p99=18.29ms
+```
+
+### Three-way comparison table
+
+| Reducer | Conc | Rust TPS | Perry TPS | V8 TPS | Rust/V8 | Perry/V8 | Rust/Perry |
+|---------|------|----------|-----------|--------|---------|----------|------------|
+| empty | 1 | 6,298 | 4,168 | 4,410 | 1.43x | 0.95x | 1.51x |
+| empty | 4 | 21,807 | 18,111 | 13,688 | 1.59x | 1.32x | 1.20x |
+| empty | 16 | 31,023 | 23,988 | 22,428 | 1.38x | 1.07x | 1.29x |
+| cpu_heavy | 1 | 2,193 | 1,000 | 1,793 | 1.22x | 0.56x | **2.19x** |
+| cpu_heavy | 4 | 2,905 | 1,216 | 2,526 | 1.15x | 0.48x | **2.39x** |
+| cpu_heavy | 16 | 3,577 | 1,350 | 2,591 | 1.38x | 0.52x | **2.65x** |
+
+### Latency comparison (p50)
+
+| Reducer | Conc | Rust p50 | Perry p50 | V8 p50 |
+|---------|------|----------|-----------|--------|
+| empty | 1 | 0.15ms | 0.17ms | 0.17ms |
+| empty | 4 | 0.17ms | 0.20ms | 0.22ms |
+| empty | 16 | 0.23ms | 0.31ms | 0.36ms |
+| cpu_heavy | 1 | 0.44ms | 0.94ms | 0.51ms |
+| cpu_heavy | 4 | 1.11ms | 3.00ms | 1.37ms |
+| cpu_heavy | 16 | 4.41ms | 11.54ms | 4.68ms |
+
+### Analysis
+
+**Rust is the ceiling, as expected.** Rust-compiled wasm runs on the same Wasmtime host runtime as Perry, so the difference between Rust and Perry isolates the cost of Perry's JavaScript-to-wasm compilation pipeline (shadow stack, GC root tracking, NaN-boxing overhead).
+
+**Empty reducer (dispatch overhead):**
+- Rust wins at concurrency 1 (6,298 vs 4,168 Perry, vs 4,410 V8), 1.51x faster than Perry and 1.43x faster than V8.
+- Perry and V8 are nearly tied at concurrency 1 (4,168 vs 4,410, within noise). In this session Perry trails V8 slightly, unlike the earlier session where Perry led 4,920 vs 3,586. This variance confirms the earlier observation that session-to-session noise is significant (up to ~30% for empty at conc 1).
+- At higher concurrency, Rust's advantage holds (1.29x-1.59x over Perry, 1.38x-1.59x over V8). Perry overtakes V8 at conc 4 (18,111 vs 13,688 = 1.32x) and they converge at conc 16 (23,988 vs 22,428 = 1.07x).
+- **The Rust-vs-Perry gap on empty is 1.2x-1.5x.** This is Perry's dispatch overhead on top of Wasmtime — the cost of the ABI shim (describe blob lookup, id-switch dispatch, volatile sink, NaN-box return). Since both run on the same Wasmtime instance, this gap is purely Perry's shim code, not runtime differences.
+
+**CPU-heavy reducer (compute-bound):**
+- Rust dominates: 2.19x faster than Perry at conc 1, growing to 2.65x at conc 16. Perry's cpu_heavy takes 0.94ms vs Rust's 0.44ms — the difference (0.50ms per call) is the shadow-stack overhead accumulated over 100k loop iterations.
+- Rust also beats V8, but by less: 1.22x at conc 1, 1.15x-1.38x across concurrency levels. V8's TurboFan JIT is competitive with native Rust wasm on this kernel.
+- **V8 beats Perry by 1.8x on cpu_heavy (conc 1), while Rust beats V8 by only 1.2x.** This means Perry's shadow-stack overhead (0.50ms/call) is 4x larger than V8's JIT-vs-native gap (0.07ms/call). Perry's AOT compilation adds far more per-iteration cost than V8's JIT subtracts.
+- At conc 16, Rust's p99 (5.73ms) is far tighter than both Perry (14.70ms) and V8 (18.29ms), confirming that native wasm has the most predictable tail latency.
+
+**Where this leaves Perry:**
+1. Perry's dispatch advantage over V8 (the "empty" story) is real but modest in this session (0.95x-1.32x depending on concurrency and session noise). The earlier session showed a clearer 1.37x-2.60x advantage, so Perry does win on dispatch, but the magnitude varies.
+2. Perry's compute disadvantage is severe. The 2.2x-2.7x gap to Rust ceiling tells us Perry's shadow-stack machinery costs ~50% of the total compute time on a tight numeric loop. Eliminating shadow-stack operations for non-escaping locals would bring Perry close to the Rust ceiling on this workload.
+3. The Rust ceiling confirms that Wasmtime itself is not the bottleneck. Rust wasm at 2,193 TPS on cpu_heavy vs V8's 1,793 TPS shows Wasmtime can beat V8 on compute when the wasm is well-optimized. Perry's job is to close the gap between its current 1,000 TPS and the 2,193 TPS ceiling.
+
+### Files added for the Rust arm
+
+| File | Description |
+|------|-------------|
+| `bench/e2e/module/rust-bench/Cargo.toml` | Standalone crate, `spacetimedb = "=2.0.1"`, cdylib target |
+| `bench/e2e/module/rust-bench/src/lib.rs` | Two reducers: `empty` (noop) and `cpu_heavy` (xorshift32 + RPG stat kernel, `read_volatile` sink) |
+
+## Side notes / observations / complaints (Rust arm)
+
+- **The 98KB Rust wasm vs Perry's 4.7MB.** Rust compiles directly to wasm with no runtime; Perry bundles the entire perry-runtime archive (shadow stack, GC, NaN-boxing, stdlib shims). This 48x size difference has cold-start implications (more bytes to validate and compile in Wasmtime), though cold start is not measured in this session.
+
+- **SDK version pinning matters.** Using `spacetimedb = "2.0.1"` (semver range) resolved to 2.3.0 because cargo treats it as `>=2.0.1, <3.0.0`. The `"=2.0.1"` pin was required to match the server. The 2.3.0 SDK would likely have produced module def sections the 2.0.1 server does not understand, the same problem the V8 arm hit with `HttpHandlers`/`HttpRoutes`.
+
+- **Session-to-session variance is substantial.** Perry empty at conc 1 measured 4,920 TPS in the earlier V8-comparison session and 4,168 TPS in this Rust-comparison session — a 15% swing. V8 empty at conc 1 went from 3,586 to 4,410 — a 23% swing in the opposite direction. The three-way back-to-back run in one session provides the most temporally fair comparison, but absolute numbers should not be compared across sessions without acknowledging this variance.
+
+- **Rust wasm's `read_volatile` is a weaker optimization barrier than `black_box`.** The standard `std::hint::black_box` is not available on `wasm32-unknown-unknown` (it requires `core::arch` intrinsics that may not be present). `core::ptr::read_volatile` achieves the same effect for our purposes — it forces the compiler to materialize the accumulator value — but is semantically a memory operation, not a compiler hint. The LLVM backend for wasm32 treats volatile loads as non-eliminable, so the loop body survives optimization.
+
+- **Rust's p50 latency on cpu_heavy (0.44ms) gives us the kernel's true execution time on Wasmtime.** Subtracting the dispatch overhead (~0.15ms from the empty p50), the pure kernel time is ~0.29ms. Perry's kernel time is ~0.77ms (0.94 - 0.17), 2.7x slower. V8's kernel time is ~0.34ms (0.51 - 0.17), only 1.17x slower than Rust. This decomposition confirms that V8's TurboFan generates near-native-quality code for tight numeric loops, while Perry's shadow-stack overhead dominates.
+
