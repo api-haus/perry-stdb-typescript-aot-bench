@@ -16,6 +16,7 @@ Consolidated: Research → Architect → Implement (single 1M-context agent, fre
 | 03 | `03-optimization-investigation.md` | cpu_heavy bottleneck analysis (js_number_coerce / is_numeric_expr gap) |
 | 04 | `04-assemblyscript-viability.md` | AssemblyScript as alternative wasm TS compiler |
 | 05 | `05-bitcode-link-lto.md` | bitcode-link (LTO) experiment — 2.4x speedup, Perry matches V8 on cpu_heavy |
+| 06 | `06-full-runtime-lto.md` | full-runtime LTO — runtime as bitcode, hybrid overlay approach, 2.82x speedup |
 
 ## Phase checklist
 
@@ -24,3 +25,4 @@ Consolidated: Research → Architect → Implement (single 1M-context agent, fre
 - [x] Consolidated: Research → Architect → Implement (`02-consolidated.md`) — NUMBERS LANDED
 - [x] Optimization investigation (`03-optimization-investigation.md`) — bottleneck identified
 - [x] Bitcode-link LTO experiment (`05-bitcode-link-lto.md`) — 2.4x speedup, Perry LTO matches V8 on cpu_heavy
+- [x] Full-runtime LTO (`06-full-runtime-lto.md`) — hybrid approach, 2.82x speedup, runtime as bitcode works

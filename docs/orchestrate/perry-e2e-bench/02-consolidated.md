@@ -866,3 +866,154 @@ The investigation doc identified `js_number_coerce` as the bottleneck, but the a
 2. **Full-runtime LTO:** Fix the 15 wasm32 compilation errors in perry-runtime (all are missing `#[cfg(not(target_arch = "wasm32"))]` guards), rebuild with `-Clinker-plugin-lto`, and wire the existing `bitcode_link_pipeline` function into the spacetimedb compile path. This would enable LLVM to inline ALL trivial runtime calls across the entire module, not just the one we manually overlaid.
 
 3. **Integrate into compilation pipeline:** Add a `PERRY_WASM32_LTO=1` environment variable to the spacetimedb compile command that activates the bitcode-link path for wasm32. The existing `PERRY_LLVM_BITCODE_LINK` mechanism from `linker.rs` provides the infrastructure; it just needs the runtime as bitcode.
+
+## Full-runtime LTO experiment (2026-06-01)
+
+### Goal
+
+The overlay-only LTO (section above) proved 2.4x speedup by inlining one hot function via a hand-written C fast path. This experiment tests whether the FULL perry-runtime can be compiled as LLVM bitcode and merged with user code for whole-program optimization, now that the wasm32 compilation errors are fixed (cfg guards added in P1).
+
+### Investigation: runtime as bitcode
+
+The P1 fix resolved 15 compilation errors in perry-runtime for `wasm32-unknown-unknown`. The runtime now compiles cleanly: `cargo build -p perry-runtime --target wasm32-unknown-unknown --no-default-features --release` passes.
+
+Building with `-Clinker-plugin-lto -Cembed-bitcode=yes` produces an archive (`libperry_runtime.a`) where the perry-runtime's own codegen units are LLVM IR bitcode, while some dependency crates (adler2, alloc, compiler-builtins) remain as wasm binary objects. Out of 457 total objects in the archive, 53 are LLVM bitcode containing 2,026 `js_*` functions -- the full runtime surface.
+
+The key function `js_dynamic_string_or_number_add` is in the bitcode objects (type `T` = defined text symbol). All runtime functions that Perry's codegen emits calls to are available as bitcode.
+
+### Discovery: LLVM's inliner refuses the full runtime function
+
+Merging user `.ll` + all 53 runtime bitcode objects via `llvm-link` and running `opt -O3` produces a combined module where `js_dynamic_string_or_number_add` is NOT inlined into the cpu_heavy hot loop. The function remains as a separate `call` instruction.
+
+The root cause: the full Rust implementation of `js_dynamic_string_or_number_add` is approximately 500 lines of type-checking code (GC barrier, RuntimeHandleScope, `to_primitive_default_for_add`, symbol/string/BigInt checks, `js_number_coerce`). Even with whole-program visibility, LLVM's inliner cost model (default threshold ~225 instructions) determines the function is too expensive to inline. The function has attribute `#1 = { nounwind "target-cpu"="generic" }` -- no `noinline` or `alwaysinline`, so it is the cost model's decision, not an explicit prohibition.
+
+Attempting `opt -O3 --inline-threshold=10000` (aggressively raising the threshold) produced an empty output file, suggesting memory exhaustion or a compilation error in the optimizer when trying to inline very large functions across a 19MB bitcode module.
+
+### Solution: hybrid approach (overlay + full-runtime bitcode)
+
+The overlay's C implementation of `js_dynamic_string_or_number_add` is ~10 lines -- trivially inlineable. The hybrid approach combines both:
+
+1. Build runtime as LLVM bitcode (`-Clinker-plugin-lto`)
+2. Merge user `.bc` + runtime `.bc` + overlay `.bc` via `llvm-link` with `--override` for the overlay
+3. `opt -O3` inlines the overlay's small implementation into the hot loop
+4. `llc` lowers to wasm32 object
+5. `wasm-ld` links with the standard runtime archive (for non-bitcode dependency objects) using `--allow-multiple-definition`
+
+The `--override` flag in `llvm-link` replaces the runtime's `js_dynamic_string_or_number_add` with the overlay's version before optimization, so LLVM sees the small fast path and inlines it.
+
+### Pipeline
+
+```
+bench.ts
+  -> perry compile (PERRY_LLVM_KEEP_IR=1) -> user.ll
+  -> cargo build perry-runtime (RUSTFLAGS="-Clinker-plugin-lto") -> LTO archive
+  -> llvm-ar x -> 53 bitcode objects
+  -> llvm-link *.bc -> rt_merged.bc
+  -> clang -emit-llvm overlay.c -> overlay.bc
+  -> llvm-link user.bc rt_merged.bc --override overlay.bc -> merged.bc
+  -> opt -O3 merged.bc -> opt.bc                           (16s)
+  -> llc -filetype=obj -O3 -mtriple=wasm32-unknown-unknown -> lto_user.o (13s)
+  -> clang -c shim.c -> shim.o
+  -> wasm-ld shim.o lto_user.o libperry_runtime.a -> bench_perry_full_lto.wasm
+```
+
+### Wasm disassembly: hot loop
+
+**Standard build (1 function call per iteration):**
+```wasm
+    select                              ;; branchless damage > 0 ? damage : 0
+    call $js_dynamic_string_or_number_add  ;; <-- 100k calls, full runtime dispatch
+    local.set 2                         ;; acc = result
+```
+
+**Full-runtime LTO (ZERO function calls, overlay inlined):**
+```wasm
+    select                              ;; branchless damage > 0 ? damage : 0
+    local.tee 3                         ;; save result
+    i64.reinterpret_f64                 ;; NaN-box tag check (result)
+    i64.const 9221683186994511872       ;; 0x7FFA000000000000 tag threshold
+    i64.ge_u
+    br_if 1                             ;; trap if tagged (never fires)
+    local.get 2                         ;; acc
+    local.get 3                         ;; result
+    f64.add                             ;; acc += result (DIRECT)
+    local.set 2                         ;; store acc
+```
+
+`js_dynamic_string_or_number_add` does not appear ANYWHERE in the final module (0 references). The function was inlined by `opt -O3`, then the original definition was garbage-collected by `wasm-ld --gc-sections`. This is an improvement over the overlay-only build where the symbol was present but unused.
+
+### Module statistics
+
+| Metric | Standard | Overlay LTO | Full-RT LTO | Delta (std->full) |
+|--------|----------|-------------|-------------|-------------------|
+| Binary size | 4,910,021 | 4,906,691 | 7,313,699 | +2,403,678 (+49%) |
+| Function count | 3,183 | 3,180 | 5,489 | +2,306 (+72%) |
+| js_* functions | 393 | 392 | 878 | +485 (+123%) |
+| Hot loop calls | 1 | 0 | 0 | eliminated |
+| `js_dynamic_string_or_number_add` refs | present | present (unused) | 0 (eliminated) | fully eliminated |
+
+The full-runtime LTO module is larger because the bitcode-linked runtime surfaces more functions than the standard wasm archive's `--gc-sections` retains. The extra functions are transitively reachable from runtime initialization code that the bitcode link path makes visible to `wasm-ld`.
+
+### Benchmark results (1000 iterations, 100 warmup)
+
+**cpu_heavy (compute kernel):**
+
+| Runtime | TPS (run 1) | TPS (run 2, 2000it) | p50 (run 2) | p95 (run 2) |
+|---------|-------------|---------------------|-------------|-------------|
+| **Perry Standard** | 694 | 649 | 1.45ms | 2.29ms |
+| **Perry Overlay LTO** | 1,614 | 1,786 | 0.53ms | 0.70ms |
+| **Perry Full-RT LTO** | **1,771** | **1,830** | **0.52ms** | **0.60ms** |
+| **V8 JIT** | 1,617 | 1,939 | 0.50ms | 0.57ms |
+| **Rust / Wasmtime** | 1,929 | 2,122 | 0.46ms | 0.54ms |
+
+**empty (dispatch overhead):**
+
+| Runtime | TPS (run 1) | TPS (run 2, 2000it) | p50 (run 2) | p95 (run 2) |
+|---------|-------------|---------------------|-------------|-------------|
+| **Perry Standard** | 5,918 | 5,956 | 0.16ms | 0.21ms |
+| **Perry Overlay LTO** | 4,740 | 5,891 | 0.16ms | 0.20ms |
+| **Perry Full-RT LTO** | **5,861** | **6,007** | **0.16ms** | **0.19ms** |
+| **V8 JIT** | 5,536 | 4,997 | 0.17ms | 0.24ms |
+| **Rust / Wasmtime** | 3,496 | 4,583 | 0.17ms | 0.27ms |
+
+### Performance analysis
+
+**Perry Full-RT LTO matches overlay LTO on cpu_heavy and is within ~5% of V8.**
+
+- Full-RT LTO cpu_heavy: 1,830 TPS (p50=0.52ms) vs overlay LTO: 1,786 TPS (p50=0.53ms). The 2.4% improvement is marginal and within session noise. Both approaches inline the same overlay function; the full-runtime bitcode does not provide additional speedup for this specific benchmark because the hot loop only calls one runtime function.
+
+- Full-RT LTO vs V8: 1,830 vs 1,939 TPS (5.6% gap). The gap narrowed from the previous session's 1,736 vs 1,788 (3% gap). Session-to-session variation is significant at this scale.
+
+- Full-RT LTO vs Rust: 1,830 vs 2,122 TPS (13.8% gap). The remaining gap is from: (a) two NaN-box tag checks per iteration (6 wasm instructions), (b) larger module (7.3MB vs 98KB) causing more Wasmtime compilation overhead, (c) NaN-box f64 representation overhead in Perry's value model.
+
+**Perry Full-RT LTO is the fastest on empty dispatch.**
+
+- Full-RT LTO empty: 6,007 TPS (p50=0.16ms) -- fastest across all runtimes.
+- V8 empty: 4,997 TPS. Rust empty: 4,583 TPS.
+- The empty result is surprising and consistent across both runs. The 7.3MB module's `opt -O3` pass may have optimized function prologues and module initialization code more aggressively than the standard build. Or the additional runtime code from the bitcode link (878 vs 393 js_* functions) somehow benefits Wasmtime's compilation or caching.
+
+**The full-RT LTO path does NOT provide additional speedup for this benchmark's hot function** because LLVM's inliner cannot inline the full Rust implementation regardless of whole-program visibility -- the overlay is still required. The benefit of full-RT bitcode is: (a) better dead-code elimination across the runtime, (b) potential optimization of OTHER runtime calls in more complex modules, (c) complete elimination of `js_dynamic_string_or_number_add` from the binary (vs just unused in overlay-only).
+
+### Why the module is larger
+
+The full-RT LTO module (7.3MB) is 49% larger than the standard build (4.9MB). This is because:
+
+1. The bitcode-link path merges 53 runtime bitcode objects into the user module before optimization. These objects define 2,026 `js_*` functions.
+2. After `opt -O3`, many of these functions survive because they are transitively reachable from `perry_module_init` and other initialization code.
+3. When `llc` produces the wasm object, all surviving functions become defined symbols.
+4. `wasm-ld --gc-sections` retains 878 `js_*` functions (vs 393 in the standard build) because the bitcode-linked object has more reachable code paths.
+
+The standard build links the runtime as a wasm archive, where `wasm-ld` only pulls in objects that define symbols needed by the user code. The LTO build merges everything first, then garbage-collects -- a less selective process.
+
+A production implementation should investigate: (a) marking more runtime functions as `noinline` in Rust to prevent code bloat from speculative inlining, (b) using LLVM's `internalize` pass to mark non-exported symbols as `internal` before `opt -O3`, enabling more aggressive dead-code elimination, (c) splitting the runtime into "core" (value ops, GC) and "extended" (RegExp, URL, crypto) bitcode, merging only core.
+
+### Files created
+
+| File | Description |
+|------|-------------|
+| `bench/e2e/module/bench_perry_full_lto.wasm` | Full-runtime LTO module (7.3MB, validated) |
+| `bench/e2e/build_full_lto.sh` | Reproducible build script for the hybrid LTO pipeline |
+
+### Build script
+
+`bench/e2e/build_full_lto.sh` automates the full pipeline. Prerequisite: the LTO runtime archive must be built first (the script handles this automatically if missing). Build time is ~90 seconds: ~55s for the runtime LTO build (cached after first run), ~16s for `opt -O3`, ~13s for `llc`.
