@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "modules": [
+    {
+      "source": "/mnt/archive4/DEV/mmodb/bench/e2e/module/bench.ts",
+      "package": null,
+      "stdlib": {}
+    }
+  ]
+}
