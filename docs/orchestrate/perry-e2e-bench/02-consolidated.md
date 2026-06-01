@@ -677,3 +677,121 @@ Concurrency 16:
 
 - **Rust's p50 latency on cpu_heavy (0.44ms) gives us the kernel's true execution time on Wasmtime.** Subtracting the dispatch overhead (~0.15ms from the empty p50), the pure kernel time is ~0.29ms. Perry's kernel time is ~0.77ms (0.94 - 0.17), 2.7x slower. V8's kernel time is ~0.34ms (0.51 - 0.17), only 1.17x slower than Rust. This decomposition confirms that V8's TurboFan generates near-native-quality code for tight numeric loops, while Perry's shadow-stack overhead dominates.
 
+## Post-rebase Perry rebuild + bench (2026-06-01)
+
+Perry-fork rebased onto latest upstream main (50 newer commits). Branch `feat/target-spacetimedb`, HEAD `b190a1f5` (latest commit on rebased branch: `d43bca53`). Perry compiler rebuilt from rebased source (`perry 0.5.1055`, up from 0.5.1028). The bench module was recompiled and republished. All three runtimes benchmarked back-to-back in one session.
+
+### Build notes
+
+- `cargo build --release -p perry` succeeded with 76 warnings (all dead-code / unused-import, no errors). Build time: 1m44s.
+- The standalone `cargo build -p perry-runtime --target wasm32-unknown-unknown --no-default-features --release` **failed** with 15 errors (`libc` not available on wasm32, unresolved `command`/`res`/`target`/`path` identifiers in `fd_ops.rs`, arithmetic overflow in integer casts). These are regressions from the rebase — the upstream added filesystem operations that use `libc` and host-only APIs. However, this does not block module compilation: `perry compile --target spacetimedb` uses its own internal auto-optimize path that builds a wasm32 runtime archive independently (output: `target/perry-auto-b7c69fbf7e193e3b/release/libperry_runtime.a`, 58.6MB).
+- `perry compile bench.ts --target spacetimedb -o bench_perry.wasm` succeeded. Binary size: 4.7MB. Reducers: `[cpu_heavy, empty]`. `wasm-tools validate` passed.
+- Module republished to `bench-perry-e2e`. Both `empty` and `cpu_heavy` reducers verified callable.
+
+### Captured numbers
+
+All three arms run back-to-back in one session (warmup=100, iterations=1000, concurrency=1,4,16) against the same SpacetimeDB v2.0.1 server instance.
+
+**Rust / Wasmtime (bench-rust-e2e):**
+```
+Concurrency 1:
+  empty:     5,717 TPS | p50=0.16ms  p95=0.22ms  p99=0.32ms
+  cpu_heavy: 1,906 TPS | p50=0.48ms  p95=0.64ms  p99=1.88ms
+
+Concurrency 4:
+  empty:     19,884 TPS | p50=0.18ms  p95=0.27ms  p99=0.37ms
+  cpu_heavy:  3,467 TPS | p50=1.11ms  p95=1.38ms  p99=2.19ms
+
+Concurrency 16:
+  empty:     29,911 TPS | p50=0.23ms  p95=0.53ms  p99=14.16ms
+  cpu_heavy:  3,580 TPS | p50=4.36ms  p95=4.79ms  p99=6.08ms
+```
+
+**Perry AOT (bench-perry-e2e, recompiled from rebased v0.5.1055):**
+```
+Concurrency 1:
+  empty:     5,658 TPS | p50=0.17ms  p95=0.20ms  p99=0.28ms
+  cpu_heavy:   712 TPS | p50=1.35ms  p95=1.66ms  p99=2.86ms
+
+Concurrency 4:
+  empty:     16,657 TPS | p50=0.20ms  p95=0.33ms  p99=1.02ms
+  cpu_heavy:    868 TPS | p50=4.56ms  p95=4.88ms  p99=5.73ms
+
+Concurrency 16:
+  empty:     31,493 TPS | p50=0.27ms  p95=0.54ms  p99=10.65ms
+  cpu_heavy:    875 TPS | p50=18.14ms p95=19.55ms p99=20.13ms
+```
+
+**V8 JIT (bench-v8-e2e):**
+```
+Concurrency 1:
+  empty:     4,659 TPS | p50=0.17ms  p95=0.28ms  p99=1.38ms
+  cpu_heavy: 1,825 TPS | p50=0.51ms  p95=0.62ms  p99=1.44ms
+
+Concurrency 4:
+  empty:     16,594 TPS | p50=0.21ms  p95=0.34ms  p99=0.53ms
+  cpu_heavy:  2,519 TPS | p50=1.41ms  p95=2.93ms  p99=3.50ms
+
+Concurrency 16:
+  empty:     11,896 TPS | p50=0.40ms  p95=5.82ms  p99=15.83ms
+  cpu_heavy:  2,665 TPS | p50=4.25ms  p95=14.87ms p99=22.43ms
+```
+
+### Three-way comparison table (TPS)
+
+| Reducer | Conc | Rust TPS | Perry TPS | V8 TPS | Rust/Perry | Rust/V8 | Perry/V8 |
+|---------|------|----------|-----------|--------|------------|---------|----------|
+| empty | 1 | 5,717 | 5,658 | 4,659 | 1.01x | 1.23x | 1.21x |
+| empty | 4 | 19,884 | 16,657 | 16,594 | 1.19x | 1.20x | 1.00x |
+| empty | 16 | 29,911 | 31,493 | 11,896 | 0.95x | 2.51x | 2.65x |
+| cpu_heavy | 1 | 1,906 | 712 | 1,825 | **2.68x** | 1.04x | **0.39x** |
+| cpu_heavy | 4 | 3,467 | 868 | 2,519 | **3.99x** | 1.38x | **0.34x** |
+| cpu_heavy | 16 | 3,580 | 875 | 2,665 | **4.09x** | 1.34x | **0.33x** |
+
+### Latency comparison (p50)
+
+| Reducer | Conc | Rust p50 | Perry p50 | V8 p50 |
+|---------|------|----------|-----------|--------|
+| empty | 1 | 0.16ms | 0.17ms | 0.17ms |
+| empty | 4 | 0.18ms | 0.20ms | 0.21ms |
+| empty | 16 | 0.23ms | 0.27ms | 0.40ms |
+| cpu_heavy | 1 | 0.48ms | 1.35ms | 0.51ms |
+| cpu_heavy | 4 | 1.11ms | 4.56ms | 1.41ms |
+| cpu_heavy | 16 | 4.36ms | 18.14ms | 4.25ms |
+
+### Analysis
+
+**Empty reducer (dispatch overhead):** Perry and Rust are essentially tied at concurrency 1 (5,658 vs 5,717 TPS, p50 0.17ms vs 0.16ms). This is a notable improvement from the pre-rebase session where Perry trailed Rust by 1.51x on empty. Perry also beats V8 at concurrency 1 (1.21x) and dramatically at concurrency 16 (2.65x). At conc 16, Perry (31,493 TPS) actually edges past Rust (29,911 TPS), though this is likely within noise. V8 shows poor concurrency 16 scaling in this session (11,896 TPS), with high p95/p99 tail latency (5.82ms/15.83ms).
+
+**CPU-heavy reducer (compute-bound):** Perry's cpu_heavy performance regressed from the pre-rebase build. The previous session measured 1,000 TPS at conc 1 (0.94ms p50); this session shows 712 TPS (1.35ms p50) -- a 29% regression. The Rust/Perry gap widened from 2.19x to 2.68x at conc 1, and from 2.65x to 4.09x at conc 16. V8 continues to beat Perry on cpu_heavy by a wide margin (2.56x at conc 1).
+
+**Regression source:** The per-call kernel time for Perry cpu_heavy grew from ~0.77ms (pre-rebase: 0.94 - 0.17 dispatch) to ~1.18ms (post-rebase: 1.35 - 0.17 dispatch), a 53% increase. Since the bench.ts source is unchanged and the only variable is the Perry compiler version (v0.5.1028 -> v0.5.1055), the regression lives in the compiler's code generation or the runtime archive. The 50 upstream commits likely changed the runtime library or the wasm linker in ways that add overhead to the hot loop. The auto-optimize path built a fresh `libperry_runtime.a` (58.6MB) which may include more instrumentation or changed calling conventions.
+
+**Rust vs V8:** Rust leads V8 on cpu_heavy by 1.04x at conc 1 (nearly tied, within noise), widening to 1.34x at conc 16. On empty, Rust leads V8 by 1.23x-2.51x. These ratios are consistent with the pre-rebase session, confirming that the Rust and V8 baselines are stable -- the regression is Perry-specific.
+
+**Perry dispatch parity with Rust is the headline positive.** On the empty reducer at concurrency 1, Perry's 0.17ms p50 matches V8 and nearly matches Rust's 0.16ms. The ABI shim overhead that previously cost 1.2x-1.5x vs Rust has disappeared or been absorbed into noise. Perry's p99 on empty (0.28ms at conc 1) is tighter than both Rust (0.32ms) and V8 (1.38ms), suggesting the shim dispatch path is clean.
+
+### Comparison with pre-rebase numbers (same session format)
+
+| Metric | Pre-rebase (v0.5.1028) | Post-rebase (v0.5.1055) | Delta |
+|--------|------------------------|-------------------------|-------|
+| Perry empty c1 TPS | 4,168 | 5,658 | +36% |
+| Perry empty c1 p50 | 0.17ms | 0.17ms | unchanged |
+| Perry cpu_heavy c1 TPS | 1,000 | 712 | **-29%** |
+| Perry cpu_heavy c1 p50 | 0.94ms | 1.35ms | **+44%** |
+| Perry/Rust ratio (empty c1) | 0.66x | 0.99x | improved |
+| Perry/Rust ratio (cpu_heavy c1) | 0.46x | 0.37x | **regressed** |
+| Perry/V8 ratio (cpu_heavy c1) | 0.56x | 0.39x | **regressed** |
+
+The rebase improved Perry's dispatch overhead (empty TPS up 36%, now at parity with Rust) but regressed compute performance (cpu_heavy TPS down 29%, p50 latency up 44%). The two effects point to different code paths: dispatch is the ABI shim (improved), compute is the runtime's shadow-stack and loop codegen (regressed).
+
+## Side notes / observations / complaints (post-rebase)
+
+- **The wasm32 runtime standalone build is broken by the rebase.** The 15 errors in `perry-runtime` for `wasm32-unknown-unknown` target are from upstream commits that added filesystem operations (`fd_ops.rs`) using `libc` and host-only APIs. These are not gated by `#[cfg(not(target_arch = "wasm32"))]`. This does not block the SpacetimeDB compilation pipeline (which uses the auto-optimize path), but it does mean `cargo build -p perry-runtime --target wasm32-unknown-unknown` no longer works as a standalone command. This should be reported upstream or fixed in the fork.
+
+- **The cpu_heavy regression is the most actionable finding.** A 29% TPS drop from 50 upstream commits is significant. The regression is in the hot-loop body (dispatch is faster, compute is slower), pointing at either (a) the runtime archive gained more instrumentation per shadow-stack operation, or (b) the linker resolves different runtime symbols than before, pulling in heavier code paths. Bisecting the 50 upstream commits against the cpu_heavy benchmark would isolate the culprit.
+
+- **V8's concurrency 16 empty numbers look anomalous this session (11,896 TPS vs 22,428 in the previous session).** The 47% drop and the 5.82ms p95 suggest the V8 runtime hit GC pauses or the Docker container was under memory pressure during that specific run. The concurrency 1 and 4 numbers are consistent with previous sessions. This is another data point for the "session-to-session variance" observation -- absolute numbers at high concurrency are noisy.
+
+- **Perry at dispatch parity with Rust on empty is a genuinely strong result.** In the previous session, Perry trailed Rust by 1.51x on empty. Now they are at 1.01x. If the upstream changes that improved dispatch can be identified and preserved while reverting whatever regressed cpu_heavy, Perry would be in an excellent position: near-Rust dispatch with the possibility of closing the compute gap via shadow-stack optimization.
+
