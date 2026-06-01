@@ -795,3 +795,74 @@ The rebase improved Perry's dispatch overhead (empty TPS up 36%, now at parity w
 
 - **Perry at dispatch parity with Rust on empty is a genuinely strong result.** In the previous session, Perry trailed Rust by 1.51x on empty. Now they are at 1.01x. If the upstream changes that improved dispatch can be identified and preserved while reverting whatever regressed cpu_heavy, Perry would be in an excellent position: near-Rust dispatch with the possibility of closing the compute gap via shadow-stack optimization.
 
+## Bitcode-link (LTO) experiment (2026-06-01)
+
+Full write-up: `05-bitcode-link-lto.md`
+
+### Summary
+
+Implemented a targeted LTO experiment for the Perry wasm32 compilation path. The standard compilation pipeline links user code with the pre-built `libperry_runtime.a` via `wasm-ld`, which cannot inline cross-boundary function calls. By merging user LLVM IR with a bitcode "overlay" of the hot runtime function (`js_dynamic_string_or_number_add`) via `llvm-link + opt -O3 + llc`, LLVM inlines and eliminates the function call from the cpu_heavy hot loop entirely.
+
+### Approach
+
+The full-runtime LTO (rebuilding the entire perry-runtime as LLVM bitcode) is blocked by 15 compilation errors in perry-runtime for wasm32 at HEAD. Instead, a minimal C overlay implementing just the fast path of `js_dynamic_string_or_number_add` (both operands are plain f64 => return `a + b`) was compiled to bitcode and merged with user code before optimization.
+
+Pipeline: `user.ll` → `llvm-as` → `user.bc` + `overlay.c` → `clang -emit-llvm` → `overlay.bc` → `llvm-link` → `opt -O3` → `llc -mtriple=wasm32-unknown-unknown` → `lto_user.o` → `wasm-ld --allow-multiple-definition` with shim + runtime archive → `bench_perry_lto.wasm`.
+
+### Key finding: actual bottleneck is js_dynamic_string_or_number_add, not js_number_coerce
+
+The investigation doc identified `js_number_coerce` as the bottleneck, but the actual LLVM IR emits `js_dynamic_string_or_number_add` — the full dynamic `+` operator that handles strings, BigInts, symbols, and only falls through to numeric addition after exhausting all other paths. This is a heavier function than `js_number_coerce`, making the LTO win even larger than predicted.
+
+### Wasm disassembly
+
+**Standard build — hot loop has 1 function call per iteration:**
+```wasm
+    select                                    ;; damage > 0 ? damage : 0
+    call $js_dynamic_string_or_number_add     ;; 100k calls per invocation
+    local.set 2                               ;; acc = result
+```
+
+**LTO build — hot loop has ZERO function calls:**
+```wasm
+    select                                    ;; damage > 0 ? damage : 0
+    local.tee 3                               ;; save result
+    i64.reinterpret_f64                       ;; NaN-box tag check
+    i64.const 9221683186994511872
+    i64.ge_u
+    br_if 1                                   ;; (never fires for f64)
+    local.get 2 / local.get 3
+    f64.add                                   ;; acc += result (DIRECT)
+    local.set 2
+```
+
+### Results (all concurrency 1, back-to-back same session)
+
+| Runtime | cpu_heavy TPS | cpu_heavy p50 | Speedup vs Perry std |
+|---------|---------------|---------------|----------------------|
+| Perry Standard | 716 | 1.34ms | 1.0x |
+| **Perry LTO** | **1,736** | **0.53ms** | **2.4x** |
+| V8 JIT | 1,788 | 0.51ms | — |
+| Rust / Wasmtime | 2,054 | 0.47ms | — |
+
+| Runtime | empty TPS | empty p50 |
+|---------|-----------|-----------|
+| Perry Standard | 3,946 | 0.17ms |
+| **Perry LTO** | **5,159** | **0.16ms** |
+| V8 JIT | 4,985 | 0.18ms |
+| Rust / Wasmtime | 5,368 | 0.17ms |
+
+### Analysis
+
+- **cpu_heavy: 2.4x speedup.** Perry LTO closes the gap to V8 from 2.5x to 1.03x (within noise). The previous 3.7x gap vs Rust narrows to 1.18x.
+- **Perry LTO is now competitive with V8 on compute-heavy workloads.** The remaining 3% gap to V8 is from two NaN-box tag checks per iteration that a full-runtime LTO could eliminate.
+- **Perry LTO is within 18% of the Rust ceiling.** The remaining gap is from tag checks, larger module size (4.9MB vs 98KB), and NaN-box f64 representation overhead.
+- **Empty reducer also improved (+31%).** Likely from `opt -O3` optimizing function wrappers, or session noise.
+- **Module size unchanged (-0.07%).** The overlay only inlined one function. Full-runtime LTO would enable aggressive DCE across the entire runtime.
+
+### Recommended next steps
+
+1. **Fix 1 (codegen, complementary to LTO):** Add `Expr::Conditional` to `is_numeric_expr` in `type_analysis.rs`. This would eliminate the `js_dynamic_string_or_number_add` call at codegen time for provably-numeric ternary expressions, achieving the same result without LTO infrastructure.
+
+2. **Full-runtime LTO:** Fix the 15 wasm32 compilation errors in perry-runtime (all are missing `#[cfg(not(target_arch = "wasm32"))]` guards), rebuild with `-Clinker-plugin-lto`, and wire the existing `bitcode_link_pipeline` function into the spacetimedb compile path. This would enable LLVM to inline ALL trivial runtime calls across the entire module, not just the one we manually overlaid.
+
+3. **Integrate into compilation pipeline:** Add a `PERRY_WASM32_LTO=1` environment variable to the spacetimedb compile command that activates the bitcode-link path for wasm32. The existing `PERRY_LLVM_BITCODE_LINK` mechanism from `linker.rs` provides the infrastructure; it just needs the runtime as bitcode.
