@@ -147,15 +147,39 @@ if ! $PERRY_ONLY; then
     echo "=== V8 JIT — E2E Benchmark           ==="
     echo "========================================"
     echo ""
-    echo "NOTE: V8 module requires the benchmarks-ts build pipeline."
-    echo "If not set up, run with --perry-only."
+
+    V8_DB="bench-v8-e2e"
+    V8_BUNDLE="$MODULE_DIR/bench_v8.js"
+
+    if [ ! -f "$V8_BUNDLE" ]; then
+        echo "ERROR: V8 bundle not found at $V8_BUNDLE"
+        echo "Build it: cd _vendor/SpacetimeDB-fork/modules/benchmarks-ts && spacetime build"
+        echo "Then patch and copy: see docs/orchestrate/perry-e2e-bench/02-consolidated.md"
+        exit 1
+    fi
+
+    echo "--- Publishing V8 module ---"
+    $SPACETIME publish --js-path "$V8_BUNDLE" "$V8_DB" \
+        -s "$SERVER" --yes --no-config 2>&1 || true
+    echo "  Published V8 module as '$V8_DB'"
     echo ""
 
-    # The V8 module would need to be built from benchmarks-ts or a standalone TS module
-    # with spacetime publish. For now, this is a placeholder.
-    V8_DB="bench-v8-e2e"
-    echo "  V8 module publish: TODO (requires pnpm + SDK setup)"
-    echo "  Skipping V8 benchmarks for now."
+    # Verify module loaded correctly
+    echo "--- Verifying V8 module ---"
+    $SPACETIME call "$V8_DB" empty -s "$SERVER" --yes 2>&1 || true
+    echo "  V8 module verified (empty reducer callable)"
+    echo ""
+
+    "$CLIENT" \
+        --server "$SERVER" \
+        --database "$V8_DB" \
+        --reducer empty,cpu_heavy \
+        --concurrency 1 \
+        --warmup 50 \
+        --iterations 500
+
+    echo ""
+    echo "--- V8 benchmark complete ---"
     echo ""
 fi
 

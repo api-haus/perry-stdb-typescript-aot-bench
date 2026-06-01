@@ -470,3 +470,91 @@ The HTTP overhead is ~110-150us per call, consistent between both workloads. The
 
 - **The BTreeMap ordering for reducer dispatch is a three-place coupling point** (describe blob name order, dispatch switch id order, and the host's id assignment from the describe blob). BTreeMap gives deterministic alphabetical ordering, which is correct. But if a future change sorts the describe blob differently from the dispatch table, calls will route to the wrong reducer. The coupling is inherent to the ABI design — the host assigns IDs from the describe blob order, and the shim must match. A defensive assertion (compile-time or runtime) that verifies the blob's reducer name at index K matches the dispatch's extern at branch K would close this gap, but is not needed for the current two-reducer module.
 
+## V8 comparison arm (2026-06-01)
+
+### How the V8 module was built
+
+The existing `benchmarks-ts` module at `_vendor/SpacetimeDB-fork/modules/benchmarks-ts/` already had an `empty` reducer but no `cpu_heavy`. The `cpu_heavy` reducer (identical kernel to the Perry module) was added to `src/synthetic.ts`, and the module was rebuilt with `spacetime build` inside the pnpm workspace.
+
+The resulting `dist/bundle.js` required two patches before the v2.0.1 server would accept it:
+
+1. **`spacetime:sys@2.1` import stubbed.** The HEAD SDK imports `spacetime:sys@2.1` for `datastore_clear`, but the v2.0.1 server only provides `sys@2.0`. Since the bench reducers never call `datastore_clear`, replacing the import with `var _syscalls2_1 = {};` is safe.
+
+2. **`HttpHandlers` and `HttpRoutes` sections removed from the module def serialization.** The HEAD SDK emits `RawModuleDefV10Section` tags 0xb (HttpHandlers) and 0xc (HttpRoutes) that the v2.0.1 server does not recognize. The bench module has no HTTP handlers, so removing these sections from the `push()` chain in the bundle is lossless.
+
+The patched bundle was published to database `bench-v8-e2e` via `spacetime publish --js-path bench_v8.js bench-v8-e2e -s http://localhost:3000 --yes --no-config`. Both `empty` and `cpu_heavy` reducers were verified callable via `spacetime call`.
+
+### Captured numbers
+
+All numbers below are from back-to-back runs under the same conditions (same machine, same server instance, same client binary). Perry and V8 runs were interleaved to minimize temporal bias.
+
+**Perry AOT (bench-perry-e2e):**
+```
+Concurrency 1 (warmup=100, iter=1000):
+  empty:     4,920 TPS | p50=0.17ms  p95=0.33ms  p99=0.97ms
+  cpu_heavy:   955 TPS | p50=0.93ms  p95=1.77ms  p99=2.81ms
+
+Concurrency 4 (warmup=100, iter=1000):
+  empty:     18,938 TPS | p50=0.19ms  p95=0.28ms  p99=0.57ms
+  cpu_heavy:  1,314 TPS | p50=3.00ms  p95=3.68ms  p99=4.22ms
+
+Concurrency 16 (warmup=100, iter=2000):
+  empty:     34,098 TPS | p50=0.30ms  p95=0.70ms  p99=1.10ms
+  cpu_heavy:  1,369 TPS | p50=11.56ms p95=12.49ms p99=13.02ms
+```
+
+**V8 JIT (bench-v8-e2e):**
+```
+Concurrency 1 (warmup=100, iter=1000):
+  empty:     3,586 TPS | p50=0.23ms  p95=0.45ms  p99=1.59ms
+  cpu_heavy: 1,523 TPS | p50=0.56ms  p95=1.16ms  p99=2.56ms
+
+Concurrency 4 (warmup=100, iter=1000):
+  empty:     10,618 TPS | p50=0.27ms  p95=1.07ms  p99=1.42ms
+  cpu_heavy:  2,360 TPS | p50=1.49ms  p95=3.04ms  p99=3.88ms
+
+Concurrency 16 (warmup=100, iter=2000):
+  empty:     13,138 TPS | p50=0.76ms  p95=2.91ms  p99=8.71ms
+  cpu_heavy:  2,506 TPS | p50=5.24ms  p95=13.62ms p99=18.41ms
+```
+
+### Comparison table
+
+| Reducer | Concurrency | Perry TPS | V8 TPS | Ratio (Perry/V8) | Perry p50 | V8 p50 | Perry p99 | V8 p99 |
+|---------|-------------|-----------|--------|-------------------|-----------|--------|-----------|--------|
+| empty | 1 | 4,920 | 3,586 | 1.37x | 0.17ms | 0.23ms | 0.97ms | 1.59ms |
+| empty | 4 | 18,938 | 10,618 | 1.78x | 0.19ms | 0.27ms | 0.57ms | 1.42ms |
+| empty | 16 | 34,098 | 13,138 | 2.60x | 0.30ms | 0.76ms | 1.10ms | 8.71ms |
+| cpu_heavy | 1 | 955 | 1,523 | **0.63x** | 0.93ms | 0.56ms | 2.81ms | 2.56ms |
+| cpu_heavy | 4 | 1,314 | 2,360 | **0.56x** | 3.00ms | 1.49ms | 4.22ms | 3.88ms |
+| cpu_heavy | 16 | 1,369 | 2,506 | **0.55x** | 11.56ms | 5.24ms | 13.02ms | 18.41ms |
+
+### Analysis
+
+**Empty reducer (dispatch overhead):** Perry AOT wins decisively. At concurrency 1 the advantage is moderate (1.37x), but it grows with concurrency: 1.78x at conc 4, 2.60x at conc 16. This is the dispatch-only path where Perry's AOT compilation eliminates the V8 interpreter/JIT overhead per call. Perry's p99 is also much tighter (1.10ms vs 8.71ms at conc 16), indicating lower tail latency from the Wasmtime runtime compared to V8's garbage collector and JIT compiler pauses.
+
+**CPU-heavy reducer (compute-bound):** V8 JIT wins by a wide margin. At concurrency 1, V8 is 1.6x faster (1,523 vs 955 TPS, p50 0.56ms vs 0.93ms). The gap holds across all concurrency levels (roughly 0.55-0.63x Perry/V8). This is a surprising result that inverts the expected AOT-beats-JIT narrative.
+
+**Why V8 wins on cpu_heavy:** The Perry AOT cpu_heavy reducer carries shadow-stack overhead (noted in the self-review section above). Every loop iteration calls `js_shadow_frame_push`, `js_shadow_slot_bind`, `js_shadow_slot_set` from the Perry runtime for GC root tracking. In a 100k-iteration tight loop, this is substantial. V8's TurboFan JIT, by contrast, can inline the entire loop and optimize away GC barriers for local variables that never escape. The V8 JIT has decades of optimization work behind it; Perry's AOT compiler is young (v0.5.1028) and does not yet optimize away shadow-stack operations for non-escaping locals.
+
+**Scaling behavior:** Both runtimes show similar patterns -- empty scales well with concurrency (server can interleave short calls), cpu_heavy plateaus (single-threaded execution per module instance). V8's cpu_heavy scales slightly better (2,506 TPS at conc 16 vs 1,369), consistent with V8's faster per-call time leaving more headroom for server-side interleaving.
+
+### Files changed for the V8 arm
+
+| File | Change |
+|------|--------|
+| `_vendor/SpacetimeDB-fork/modules/benchmarks-ts/src/synthetic.ts` | Added `cpu_heavy` reducer with the same xorshift + RPG stat kernel |
+| `bench/e2e/module/bench_v8.js` | Patched copy of `benchmarks-ts/dist/bundle.js`: stubbed sys@2.1, removed HttpHandlers/HttpRoutes sections |
+
+## Side notes / observations / complaints (V8 arm)
+
+- **The SDK version mismatch between HEAD and v2.0.1 server required two manual patches.** The `spacetime:sys@2.1` import and the `HttpHandlers`/`HttpRoutes` module def sections are both additions in the HEAD SDK that the v2.0.1 server does not understand. A cleaner approach would be to check out the SDK at the v2.0.1 tag and build from there, but no such tag exists in the fork. The manual patches are safe for our bench-only reducers (no HTTP handlers, no table clears) but would break a module that actually uses those features.
+
+- **V8 beating Perry on cpu_heavy is the most actionable finding.** It points directly at the shadow-stack overhead in Perry's AOT output. For the specific workload of tight numeric loops with no GC-relevant allocations, Perry's conservative GC root tracking is paying a tax that V8's JIT avoids entirely. This is a known optimization target for Perry -- the compiler should be able to prove that local numeric variables never escape and skip shadow-stack operations for them.
+
+- **The "empty" comparison is the more meaningful benchmark for the Perry project's value proposition.** Perry's pitch is "faster module cold start + lower dispatch overhead." The empty reducer isolates dispatch overhead, and Perry wins convincingly there (1.37x-2.60x). The cpu_heavy comparison measures JIT optimization quality, where V8 has decades of head start. Perry's value is in the module lifecycle (publish, cold start, dispatch), not in competing with TurboFan on hot-loop optimization.
+
+- **The benchmark runs show high variance across sessions.** Perry empty at conc 1 ranged from 3,897 to 6,351 TPS across different runs. This is likely due to background system load, Docker container scheduling, and server GC activity. The back-to-back runs (Perry then V8 in the same minute) are the most comparable, which is what the comparison table uses. A production benchmark should pin CPU affinity, use cgroups for isolation, and run multiple iterations.
+
+- **The `spacetime build` command succeeds despite "tsc not found" warning.** The SpacetimeDB CLI's TS build uses rolldown (a Rust-based bundler) directly, falling back gracefully when tsc is not in the module's node_modules. Type checking is skipped, but the bundle is still produced correctly. This is fine for bench purposes but would be a concern for production modules.
+
